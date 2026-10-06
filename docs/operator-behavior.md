@@ -156,10 +156,10 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
 
 ## GitHub API
 
-- Calls go through the small REST client in [internal/controller/github/client.go](../internal/controller/github/client.go), using `net/http` (no client library).
+- Calls go through [internal/controller/github/client.go](../internal/controller/github/client.go), a thin wrapper around the [go-github](https://github.com/google/go-github) library (v90, the newest release that supports Go 1.25). The wrapper adds the title search, the pull-request check and the error mapping below.
 - The token comes from the `GITHUB_TOKEN` environment variable, which the Deployment fills from Secret `github-token-secret`, key `GITHUB_TOKEN`. The manager exits at startup if it is missing.
-- The API version is pinned with the `X-GitHub-Api-Version` header to `2026-03-10`. None of that version's breaking changes affect the fields this operator reads. The older `2022-11-28` version is supported until at least March 2028.
-- A 404 is returned as `github.ErrNotFound`, a 410 as `github.ErrGone` and a 301 as `github.ErrMoved`, all wrapped with the repository or issue they refer to; check them with `errors.Is`. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)). Other non-2xx responses become errors that include GitHub's message.
+- go-github sends the API version header `X-GitHub-Api-Version: 2022-11-28` and doesn't let a client change it. GitHub supports that version until at least March 2028.
+- A 404 is returned as `github.ErrNotFound`, a 410 as `github.ErrGone` and a 301 as `github.ErrMoved`, all wrapped with the repository or issue they refer to; check them with `errors.Is`. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)): go-github's default HTTP client follows them, so the wrapper passes its own. Other non-2xx responses become go-github errors that include GitHub's message.
 
 | Operation | Endpoint |
 |---|---|
@@ -194,7 +194,7 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
 ## Implementation status
 
 - **Done:**
-  - The GitHub client (find open issue by title, get, create, update, close, check the timeline for a linked pull request) and the pinned API version.
+  - The GitHub client on top of go-github (find open issue by title, get, create, update, close, check the timeline for a linked pull request).
   - Constants in [internal/controller/utils/consts.go](../internal/controller/utils/consts.go).
   - Shared helpers in [internal/controller/utils/utils.go](../internal/controller/utils/utils.go), including the copied-annotation check.
   - Finalizer helpers.

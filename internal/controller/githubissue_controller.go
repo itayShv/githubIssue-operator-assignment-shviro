@@ -104,7 +104,11 @@ func (r *GithubIssueReconciler) handleDelete(ctx context.Context, cr *githubv1al
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		err = r.githubClient().CloseIssue(ctx, owner, repo, number)
+		gh, err := r.githubClient()
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		err = gh.CloseIssue(ctx, owner, repo, number)
 		switch {
 		case errors.Is(err, github.ErrNotFound), errors.Is(err, github.ErrGone), errors.Is(err, github.ErrMoved):
 			logger.Info("GitHub issue was not found, deleted or moved, nothing to close", "error", err.Error())
@@ -134,14 +138,17 @@ func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1al
 	if err != nil {
 		return r.fail(ctx, cr, err)
 	}
-	gh := r.githubClient()
+	gh, err := r.githubClient()
+	if err != nil {
+		return r.fail(ctx, cr, err)
+	}
 
 	// Find the issue this CR manages
 	number, linked, err := utils.ManagedIssueNumber(ctx, r.Client, cr)
 	if err != nil {
 		return r.fail(ctx, cr, err)
 	}
-	var issue *github.IssueResponse
+	var issue *github.Issue
 	if linked {
 		issue, err = gh.GetIssue(ctx, owner, repo, number)
 		switch {
@@ -175,16 +182,16 @@ func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1al
 	}
 
 	// if the CR or the issue changed, patch the github issue so it matches the CR
-	if issue.Title != cr.Spec.Title || issue.Body != cr.Spec.Description {
-		issue, err = gh.UpdateIssue(ctx, owner, repo, issue.Number, cr.Spec.Title, cr.Spec.Description)
+	if issue.GetTitle() != cr.Spec.Title || issue.GetBody() != cr.Spec.Description {
+		issue, err = gh.UpdateIssue(ctx, owner, repo, issue.GetNumber(), cr.Spec.Title, cr.Spec.Description)
 		if err != nil {
 			return r.fail(ctx, cr, err)
 		}
-		logger.Info("Updated GitHub issue", "number", issue.Number)
+		logger.Info("Updated GitHub issue", "number", issue.GetNumber())
 	}
 
 	// issue has a PR
-	hasPR, err := gh.HasLinkedPullRequest(ctx, owner, repo, issue.Number)
+	hasPR, err := gh.HasLinkedPullRequest(ctx, owner, repo, issue.GetNumber())
 	if err != nil {
 		return r.fail(ctx, cr, err)
 	}
@@ -207,7 +214,7 @@ func (r *GithubIssueReconciler) removeIssueAnnotation(ctx context.Context, cr *g
 
 // linkIssue finds an open issue with the CR's title, or creates one, and saves its number on the CR.
 // If another CR comes first for this repo and title, it returns that CR instead and changes nothing.
-func (r *GithubIssueReconciler) linkIssue(ctx context.Context, cr *githubv1alpha1.GithubIssue, gh *github.Client, owner, repo string) (*github.IssueResponse, *githubv1alpha1.GithubIssue, error) {
+func (r *GithubIssueReconciler) linkIssue(ctx context.Context, cr *githubv1alpha1.GithubIssue, gh *github.Client, owner, repo string) (*github.Issue, *githubv1alpha1.GithubIssue, error) {
 	logger := logf.FromContext(ctx)
 
 	blocker, claimed, err := utils.CheckTitleClaim(ctx, r.apiReader(), cr)
@@ -228,17 +235,17 @@ func (r *GithubIssueReconciler) linkIssue(ctx context.Context, cr *githubv1alpha
 		if err != nil {
 			return nil, nil, err
 		}
-		logger.Info("Created GitHub issue", "number", issue.Number)
+		logger.Info("Created GitHub issue", "number", issue.GetNumber())
 	} else {
-		logger.Info("Found open GitHub issue with the same title", "number", issue.Number)
+		logger.Info("Found open GitHub issue with the same title", "number", issue.GetNumber())
 	}
 
 	// Save the link right away, before anything else can fail
-	metav1.SetMetaDataAnnotation(&cr.ObjectMeta, utils.IssueNumberAnnotation, strconv.Itoa(issue.Number))
+	metav1.SetMetaDataAnnotation(&cr.ObjectMeta, utils.IssueNumberAnnotation, strconv.Itoa(issue.GetNumber()))
 	if err := r.Update(ctx, cr); err != nil {
 		return nil, nil, err
 	}
-	logger.Info("Saved issue number annotation on GithubIssue", "name", cr.Name, "number", issue.Number)
+	logger.Info("Saved issue number annotation on GithubIssue", "name", cr.Name, "number", issue.GetNumber())
 	return issue, nil, nil
 }
 
@@ -257,11 +264,12 @@ func pullRequestCondition(cr *githubv1alpha1.GithubIssue, linked bool) metav1.Co
 
 // setSyncedStatus reports a CR in sync with its issue: Ready is True, IssueOpen follows the issue's state,
 // and IssueHasPR says whether a pull request is linked.
-func (r *GithubIssueReconciler) setSyncedStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, issue *github.IssueResponse, hasPR bool) (ctrl.Result, error) {
-	ready := condition(cr, utils.ConditionReady, metav1.ConditionTrue, utils.ReasonSynced, fmt.Sprintf("Managing GitHub issue #%d", issue.Number))
-	open := condition(cr, utils.ConditionIssueOpen, metav1.ConditionTrue, utils.ReasonOpen, fmt.Sprintf("GitHub issue #%d is open", issue.Number))
-	if issue.State == utils.GitHubIssueStateClosed {
-		open = condition(cr, utils.ConditionIssueOpen, metav1.ConditionFalse, utils.ReasonClosed, fmt.Sprintf("GitHub issue #%d is closed", issue.Number))
+func (r *GithubIssueReconciler) setSyncedStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, issue *github.Issue, hasPR bool) (ctrl.Result, error) {
+	number := issue.GetNumber()
+	ready := condition(cr, utils.ConditionReady, metav1.ConditionTrue, utils.ReasonSynced, fmt.Sprintf("Managing GitHub issue #%d", number))
+	open := condition(cr, utils.ConditionIssueOpen, metav1.ConditionTrue, utils.ReasonOpen, fmt.Sprintf("GitHub issue #%d is open", number))
+	if issue.GetState() == utils.GitHubIssueStateClosed {
+		open = condition(cr, utils.ConditionIssueOpen, metav1.ConditionFalse, utils.ReasonClosed, fmt.Sprintf("GitHub issue #%d is closed", number))
 	}
 	return r.setStatus(ctx, cr, ready, open, pullRequestCondition(cr, hasPR))
 }
@@ -334,7 +342,7 @@ func (r *GithubIssueReconciler) apiReader() client.Reader {
 	return r.Client
 }
 
-func (r *GithubIssueReconciler) githubClient() *github.Client {
+func (r *GithubIssueReconciler) githubClient() (*github.Client, error) {
 	return github.NewClient(r.GitHubAPIURL, r.GitHubToken)
 }
 

@@ -1,15 +1,12 @@
 package github
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
+
+	gogithub "github.com/google/go-github/v90/github"
 
 	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
@@ -26,109 +23,94 @@ var (
 	ErrMoved = errors.New("moved (the issue was transferred, or the repository was renamed or transferred)")
 )
 
-// IssueResponse is the subset of the GitHub issue fields the operator uses.
-type IssueResponse struct {
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	State       string    `json:"state"`
-	PullRequest *struct{} `json:"pull_request,omitempty"`
-}
+// Issue is a GitHub issue as go-github returns it. Read its fields with the getters (GetTitle, GetNumber...).
+type Issue = gogithub.Issue
 
-// timelineEvent is the part of an issue timeline event the operator reads.
-type timelineEvent struct {
-	Event string `json:"event"`
-}
-
-// issueRequest is the body for creating or updating an issue.
-// Body is a pointer so an empty description is still sent, while nil leaves it out.
-type issueRequest struct {
-	Title string  `json:"title,omitempty"`
-	Body  *string `json:"body,omitempty"`
-	State string  `json:"state,omitempty"`
-}
-
-// Client is a minimal GitHub REST client for issues.
+// Client is the operator's GitHub issues client, on top of go-github.
 type Client struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
+	gh *gogithub.Client
 }
 
 // NewClient returns a Client for the given token. An empty baseURL means api.github.com.
-func NewClient(baseURL, token string) *Client {
-	if baseURL == "" {
-		baseURL = utils.GitHubAPIBaseURL
-	}
-	return &Client{
-		BaseURL: strings.TrimSuffix(baseURL, "/"),
-		Token:   token,
-		HTTPClient: &http.Client{
+func NewClient(baseURL, token string) (*Client, error) {
+	opts := []gogithub.ClientOptionsFunc{
+		gogithub.WithHTTPClient(&http.Client{
 			Timeout: utils.GitHubHTTPTimeout,
 			// Don't follow redirects: Go turns a redirected PATCH into a GET, so updates and closes would
-			// silently do nothing. A moved issue or repository is returned as ErrMoved instead.
+			// silently do nothing. go-github then returns a moved issue or repository as a RedirectionError.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		}),
 	}
+	if token != "" {
+		opts = append(opts, gogithub.WithAuthToken(token))
+	}
+	if baseURL != "" {
+		opts = append(opts, gogithub.WithURLs(&baseURL, nil))
+	}
+	gh, err := gogithub.NewClient(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating GitHub client: %w", err)
+	}
+	return &Client{gh: gh}, nil
 }
 
 // FindIssueByTitle returns the open issue whose title exactly matches, or nil if none does.
 // Pull requests (the issues API returns them too) and issues whose numbers are in skip are ignored.
-func (c *Client) FindIssueByTitle(ctx context.Context, owner, repo, title string, skip map[int]bool) (*IssueResponse, error) {
-	for page := 1; ; page++ {
-		path := fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=%d&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), utils.GitHubPageSize, page)
-		var issues []IssueResponse
-		if err := c.do(ctx, http.MethodGet, path, nil, &issues); err != nil {
-			return nil, repoError(owner, repo, err)
+func (c *Client) FindIssueByTitle(ctx context.Context, owner, repo, title string, skip map[int]bool) (*Issue, error) {
+	opts := &gogithub.IssueListByRepoOptions{
+		State:       "open",
+		ListOptions: gogithub.ListOptions{PerPage: utils.GitHubPageSize},
+	}
+	for {
+		issues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, repoError(owner, repo, mapError(err))
 		}
-		if len(issues) == 0 {
-			return nil, nil
-		}
-		for i := range issues {
-			//return only issues, not pull requests
-			if issues[i].PullRequest == nil && issues[i].Title == title && !skip[issues[i].Number] {
-				return &issues[i], nil
+		for _, issue := range issues {
+			// return only issues, not pull requests
+			if !issue.IsPullRequest() && issue.GetTitle() == title && !skip[issue.GetNumber()] {
+				return issue, nil
 			}
 		}
+		if resp.NextPage == 0 {
+			return nil, nil
+		}
+		opts.ListOptions.Page = resp.NextPage
 	}
 }
 
 // CreateIssue opens a new issue and returns it.
-func (c *Client) CreateIssue(ctx context.Context, owner, repo, title, body string) (*IssueResponse, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues", url.PathEscape(owner), url.PathEscape(repo))
-	var issue IssueResponse
-	if err := c.do(ctx, http.MethodPost, path, issueRequest{Title: title, Body: &body}, &issue); err != nil {
-		return nil, repoError(owner, repo, err)
+func (c *Client) CreateIssue(ctx context.Context, owner, repo, title, body string) (*Issue, error) {
+	issue, _, err := c.gh.Issues.Create(ctx, owner, repo, gogithub.CreateIssueRequest{Title: title, Body: &body})
+	if err != nil {
+		return nil, repoError(owner, repo, mapError(err))
 	}
-	return &issue, nil
+	return issue, nil
 }
 
 // GetIssue returns the issue with the given number.
-func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (*IssueResponse, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	var issue IssueResponse
-	if err := c.do(ctx, http.MethodGet, path, nil, &issue); err != nil {
-		return nil, issueError(owner, repo, number, err)
+func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (*Issue, error) {
+	issue, _, err := c.gh.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		return nil, issueError(owner, repo, number, mapError(err))
 	}
-	return &issue, nil
+	return issue, nil
 }
 
 // UpdateIssue sets the issue title and description and returns the updated issue.
-func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int, title, body string) (*IssueResponse, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	var issue IssueResponse
-	if err := c.do(ctx, http.MethodPatch, path, issueRequest{Title: title, Body: &body}, &issue); err != nil {
-		return nil, issueError(owner, repo, number, err)
+func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int, title, body string) (*Issue, error) {
+	issue, _, err := c.gh.Issues.Update(ctx, owner, repo, number, gogithub.UpdateIssueRequest{Title: &title, Body: &body})
+	if err != nil {
+		return nil, issueError(owner, repo, number, mapError(err))
 	}
-	return &issue, nil
+	return issue, nil
 }
 
 // CloseIssue sets the issue state to closed.
 func (c *Client) CloseIssue(ctx context.Context, owner, repo string, number int) error {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	err := c.do(ctx, http.MethodPatch, path, issueRequest{State: utils.GitHubIssueStateClosed}, nil)
-	return issueError(owner, repo, number, err)
+	_, _, err := c.gh.Issues.Update(ctx, owner, repo, number,
+		gogithub.UpdateIssueRequest{State: gogithub.Ptr(utils.GitHubIssueStateClosed)})
+	return issueError(owner, repo, number, mapError(err))
 }
 
 // HasLinkedPullRequest reports whether a pull request is linked to the issue from its "Development" sidebar.
@@ -136,26 +118,44 @@ func (c *Client) CloseIssue(ctx context.Context, owner, repo string, number int)
 // say which pull request was linked or what state it is in.
 func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, number int) (bool, error) {
 	linked := 0
-	for page := 1; ; page++ {
-		path := fmt.Sprintf("/repos/%s/%s/issues/%d/timeline?per_page=%d&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), number, utils.GitHubPageSize, page)
-		var events []timelineEvent
-		if err := c.do(ctx, http.MethodGet, path, nil, &events); err != nil {
-			return false, issueError(owner, repo, number, err)
+	opts := &gogithub.ListOptions{PerPage: utils.GitHubPageSize}
+	for {
+		events, resp, err := c.gh.Issues.ListIssueTimeline(ctx, owner, repo, number, opts)
+		if err != nil {
+			return false, issueError(owner, repo, number, mapError(err))
 		}
 		for _, e := range events {
-			switch e.Event {
+			switch e.GetEvent() {
 			case utils.GitHubEventConnected:
 				linked++
 			case utils.GitHubEventDisconnected:
 				linked--
 			}
 		}
-		// A short page is the last one
-		if len(events) < utils.GitHubPageSize {
+		if resp.NextPage == 0 {
 			return linked > 0, nil
 		}
+		opts.Page = resp.NextPage
 	}
+}
+
+// mapError turns go-github's errors for 404, 410 and 301 into ErrNotFound, ErrGone and ErrMoved,
+// leaving other errors unchanged.
+func mapError(err error) error {
+	var redirect *gogithub.RedirectionError
+	if errors.As(err, &redirect) && redirect.StatusCode == http.StatusMovedPermanently {
+		return ErrMoved
+	}
+	var errResp *gogithub.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil {
+		switch errResp.Response.StatusCode {
+		case http.StatusNotFound:
+			return ErrNotFound
+		case http.StatusGone:
+			return ErrGone
+		}
+	}
+	return err
 }
 
 // repoError adds the repository to a not-found, gone or moved error, leaving other errors unchanged.
@@ -172,52 +172,4 @@ func issueError(owner, repo string, number int, err error) error {
 		return fmt.Errorf("github issue %s/%s#%d: %w", owner, repo, number, err)
 	}
 	return err
-}
-
-func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	//executes the request - sends the http request to the github api
-	var reqBody io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reqBody = bytes.NewReader(b)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reqBody)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", utils.GitHubMediaType)
-	req.Header.Set(utils.GitHubAPIVersionHeader, utils.GitHubAPIVersion)
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", utils.JSONContentType)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	switch resp.StatusCode {
-	case http.StatusMovedPermanently:
-		return ErrMoved
-	case http.StatusNotFound:
-		return ErrNotFound
-	case http.StatusGone:
-		return ErrGone
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("github API %s %s returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(msg)))
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
 }
