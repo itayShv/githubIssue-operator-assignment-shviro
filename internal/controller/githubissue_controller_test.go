@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	githubv1alpha1 "github.com/itayshviro/githubissue-operator/api/v1alpha1"
-	"github.com/itayshviro/githubissue-operator/internal/controller/github"
 	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
 
@@ -250,10 +249,18 @@ type fakeGitHub struct {
 
 	mu sync.Mutex
 	// issues[i] is issue number i+1
-	issues []*github.IssueResponse
+	issues []*fakeIssue
 	// unavailable maps an issue number to the status GitHub answers for it instead of the issue:
 	// 410 after a delete, 301 after a transfer, 404 when the token can't see it.
 	unavailable map[int]int
+}
+
+// fakeIssue is the part of a GitHub issue the fake stores and returns.
+type fakeIssue struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
 }
 
 // issueRequestBody is the body the operator sends to create or update an issue. Nil means the field was left out.
@@ -292,7 +299,7 @@ func (f *fakeGitHub) makeUnavailable(number, status int) {
 }
 
 // issue returns a copy of the issue with the given number, or nil if there is none.
-func (f *fakeGitHub) issue(number int) *github.IssueResponse {
+func (f *fakeGitHub) issue(number int) *fakeIssue {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	issue := f.lookup(number)
@@ -310,14 +317,14 @@ func (f *fakeGitHub) issueCount() int {
 }
 
 // add appends an open issue. f.mu must be held.
-func (f *fakeGitHub) add(title, body string) *github.IssueResponse {
-	issue := &github.IssueResponse{Number: len(f.issues) + 1, Title: title, Body: body, State: issueStateOpen}
+func (f *fakeGitHub) add(title, body string) *fakeIssue {
+	issue := &fakeIssue{Number: len(f.issues) + 1, Title: title, Body: body, State: issueStateOpen}
 	f.issues = append(f.issues, issue)
 	return issue
 }
 
 // lookup returns the issue with the given number, or nil if there is none. f.mu must be held.
-func (f *fakeGitHub) lookup(number int) *github.IssueResponse {
+func (f *fakeGitHub) lookup(number int) *fakeIssue {
 	if number < 1 || number > len(f.issues) {
 		return nil
 	}
@@ -325,7 +332,7 @@ func (f *fakeGitHub) lookup(number int) *github.IssueResponse {
 }
 
 // requestedIssue returns the issue named by the request's {number}, or nil if there is none. f.mu must be held.
-func (f *fakeGitHub) requestedIssue(r *http.Request) *github.IssueResponse {
+func (f *fakeGitHub) requestedIssue(r *http.Request) *fakeIssue {
 	number, err := strconv.Atoi(r.PathValue("number"))
 	if err != nil {
 		return nil
@@ -353,16 +360,15 @@ func (f *fakeGitHub) writeUnavailable(w http.ResponseWriter, r *http.Request) bo
 	return true
 }
 
-// listIssues answers GET /repos/{owner}/{repo}/issues?state=open. All issues fit on page 1.
-func (f *fakeGitHub) listIssues(w http.ResponseWriter, r *http.Request) {
+// listIssues answers GET /repos/{owner}/{repo}/issues?state=open. All issues fit on one page,
+// so the answer has no Link header to a next page.
+func (f *fakeGitHub) listIssues(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	open := make([]github.IssueResponse, 0, len(f.issues))
-	if r.URL.Query().Get("page") == "1" {
-		for _, issue := range f.issues {
-			if issue.State == issueStateOpen && f.unavailable[issue.Number] == 0 {
-				open = append(open, *issue)
-			}
+	open := make([]fakeIssue, 0, len(f.issues))
+	for _, issue := range f.issues {
+		if issue.State == issueStateOpen && f.unavailable[issue.Number] == 0 {
+			open = append(open, *issue)
 		}
 	}
 	writeJSON(w, http.StatusOK, open)

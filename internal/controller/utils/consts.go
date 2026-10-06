@@ -11,16 +11,9 @@ const (
 	IssueNumberAnnotation = "github.itayshviro.dev/issue-number"
 )
 
-// GitHub REST API settings.
+// GitHub REST API settings. go-github sets the base URL, headers and API version.
 const (
-	GitHubAPIBaseURL = "https://api.github.com"
-	// GitHubAPIVersion pins the REST API version so GitHub can't change response shapes under us.
-	// See https://docs.github.com/en/rest/about-the-rest-api/api-versions
-	GitHubAPIVersion       = "2026-03-10"
-	GitHubAPIVersionHeader = "X-GitHub-Api-Version"
-	GitHubMediaType        = "application/vnd.github+json"
-	JSONContentType        = "application/json"
-	GitHubHTTPTimeout      = 30 * time.Second
+	GitHubHTTPTimeout = 30 * time.Second
 	// GitHubPageSize is how many items to request per page from list endpoints (GitHub's maximum).
 	GitHubPageSize = 100
 )
