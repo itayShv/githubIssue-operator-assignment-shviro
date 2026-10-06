@@ -1,4 +1,5 @@
-FROM mcr.microsoft.com/devcontainers/go:1-bookworm
+# Pinned to the Go version in go.mod, which CI uses too. golangci-lint v2.11.4 can't read packages built by Go 1.27.
+FROM mcr.microsoft.com/devcontainers/go:1.25-bookworm
 
 # Defining versions
 ARG KIND_VERSION="v0.31.0"

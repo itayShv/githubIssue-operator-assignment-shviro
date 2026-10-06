@@ -44,8 +44,11 @@ spec:
                 type: string
               repo:
                 description: The Repositories URL of the issue
-                format: uri
+                pattern: ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$
                 type: string
+                x-kubernetes-validations:
+                - message: repo is immutable
+                  rule: self == oldSelf
               title:
                 description: Issue's Title
                 type: string

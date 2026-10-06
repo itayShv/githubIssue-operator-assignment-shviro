@@ -41,6 +41,7 @@ type GithubIssueSpec struct {
 	// The Repositories URL of the issue
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="repo is immutable"
 	Repo string `json:"repo"`
 }
 

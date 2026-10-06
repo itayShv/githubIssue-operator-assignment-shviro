@@ -186,6 +186,7 @@ func main() {
 
 	if err := (&controller.GithubIssueReconciler{
 		Client:      mgr.GetClient(),
+		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
 		GitHubToken: githubToken,
 	}).SetupWithManager(mgr); err != nil {
