@@ -14,18 +14,6 @@ import (
 	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
 
-var (
-	// ErrNotFound is returned (wrapped with the repo or issue details) when GitHub answers 404:
-	// the repo or issue doesn't exist, or the token can't see it.
-	ErrNotFound = errors.New("not found")
-	// ErrGone is returned (wrapped with the repo or issue details) when GitHub answers 410:
-	// the issue was deleted, or issues are disabled in the repository.
-	ErrGone = errors.New("gone (deleted, or issues are disabled in the repository)")
-	// ErrMoved is returned (wrapped with the repo or issue details) when GitHub answers 301:
-	// the issue was transferred to another repository, or the repository was renamed or transferred.
-	ErrMoved = errors.New("moved (the issue was transferred, or the repository was renamed or transferred)")
-)
-
 // IssueResponse is the subset of the GitHub issue fields the operator uses.
 type IssueResponse struct {
 	Number      int       `json:"number"`
@@ -66,7 +54,7 @@ func NewClient(baseURL, token string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: utils.GitHubHTTPTimeout,
 			// Don't follow redirects: Go turns a redirected PATCH into a GET, so updates and closes would
-			// silently do nothing. A moved issue or repository is returned as ErrMoved instead.
+			// silently do nothing. A moved issue or repository is returned as utils.ErrMoved instead.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
@@ -160,7 +148,7 @@ func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, n
 
 // repoError adds the repository to a not-found, gone or moved error, leaving other errors unchanged.
 func repoError(owner, repo string, err error) error {
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
+	if errors.Is(err, utils.ErrNotFound) || errors.Is(err, utils.ErrGone) || errors.Is(err, utils.ErrMoved) {
 		return fmt.Errorf("github repository %s/%s: %w", owner, repo, err)
 	}
 	return err
@@ -168,7 +156,7 @@ func repoError(owner, repo string, err error) error {
 
 // issueError adds the issue to a not-found, gone or moved error, leaving other errors unchanged.
 func issueError(owner, repo string, number int, err error) error {
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
+	if errors.Is(err, utils.ErrNotFound) || errors.Is(err, utils.ErrGone) || errors.Is(err, utils.ErrMoved) {
 		return fmt.Errorf("github issue %s/%s#%d: %w", owner, repo, number, err)
 	}
 	return err
@@ -206,11 +194,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	switch resp.StatusCode {
 	case http.StatusMovedPermanently:
-		return ErrMoved
+		return utils.ErrMoved
 	case http.StatusNotFound:
-		return ErrNotFound
+		return utils.ErrNotFound
 	case http.StatusGone:
-		return ErrGone
+		return utils.ErrGone
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

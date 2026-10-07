@@ -20,14 +20,24 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	githubv1alpha1 "github.com/itayshviro/githubissue-operator/api/v1alpha1"
 	"github.com/itayshviro/githubissue-operator/test/utils"
 )
 
@@ -36,6 +46,15 @@ var (
 	managerImage = "example.com/githubissue-operator-assignment-shviro:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
+)
+
+// The GithubIssue controller tests call the reconciler directly against envtest (a local API server and
+// etcd), not against the manager deployed to Kind.
+var (
+	ctx       context.Context
+	cancel    context.CancelFunc
+	testEnv   *envtest.Environment
+	k8sClient client.Client
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -64,9 +83,11 @@ var _ = BeforeSuite(func() {
 
 	configureKubectlKubeRC()
 	setupCertManager()
+	startEnvtest()
 })
 
 var _ = AfterSuite(func() {
+	stopEnvtest()
 	teardownCertManager()
 })
 
@@ -116,4 +137,40 @@ func teardownCertManager() {
 
 	By("uninstalling CertManager")
 	utils.UninstallCertManager()
+}
+
+// startEnvtest starts envtest with the project's CRDs installed and connects k8sClient to it.
+func startEnvtest() {
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+	ctx, cancel = context.WithCancel(context.TODO())
+
+	err := githubv1alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	// utils.Run changes the working directory to the project root, so a path relative to test/e2e would break.
+	projectDir, err := utils.GetProjectDir()
+	Expect(err).NotTo(HaveOccurred())
+
+	By("bootstrapping the envtest environment")
+	testEnv = &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join(projectDir, "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+	}
+	cfg, err := testEnv.Start()
+	Expect(err).NotTo(HaveOccurred())
+
+	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	Expect(err).NotTo(HaveOccurred())
+}
+
+// stopEnvtest stops envtest if startEnvtest started it.
+func stopEnvtest() {
+	if testEnv == nil {
+		return
+	}
+	By("tearing down the envtest environment")
+	cancel()
+	Eventually(func() error {
+		return testEnv.Stop()
+	}, time.Minute, time.Second).Should(Succeed())
 }

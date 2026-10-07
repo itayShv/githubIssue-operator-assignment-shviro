@@ -39,14 +39,13 @@ What the assignment requires (per README):
 - [internal/controller/utils/utils.go](internal/controller/utils/utils.go): helpers shared by the reconcile paths: `ParseRepoURL`, `SameRepo` (case-insensitive owner/repo), `ManagedIssueNumber` (reads the annotation and applies the older-CR-wins rule, listing CRs cluster-wide), `CheckTitleClaim` (duplicate check before linking by title), and `IsOlder`.
 
 **Current state:** the reconcile logic is complete and all tests pass. The tests use Ginkgo, and none call the real GitHub:
-- [githubissue_controller_test.go](internal/controller/githubissue_controller_test.go): envtest plus `fakeGitHub`, an in-memory GitHub served by `httptest` (`makeUnavailable` makes it answer 410, 301 or 404 for an issue). It covers the four README cases, plus deleted, moved and not-found issues and duplicate CRs.
+- [githubissue_controller_test.go](test/e2e/githubissue_controller_test.go): envtest plus `fakeGitHub`, an in-memory GitHub served by `httptest` (`makeUnavailable` makes it answer 410, 301 or 404 for an issue). It covers the four README cases, plus deleted, moved and not-found issues and duplicate CRs. The user moved it to the e2e suite (build tag `e2e`), so only `make test-e2e` runs it; don't move it back without asking. It still calls `Reconcile` directly against envtest, which [e2e_suite_test.go](test/e2e/e2e_suite_test.go) starts in `BeforeSuite` (with paths from `utils.GetProjectDir()`, since `utils.Run` changes the working directory).
 - [github/client_test.go](internal/controller/github/client_test.go): an `httptest` server that records each request. It covers headers, request bodies, paging, error mapping and pull-request counting.
 - [utils/utils_test.go](internal/controller/utils/utils_test.go): controller-runtime's fake client. It doesn't assign UIDs, and the helpers skip the CR itself by UID, so test CRs set `UID` explicitly.
 
 Open items:
 - Closing keywords (`Fixes #N`) aren't detected by `IssueHasPR` (see Operator design above).
 - The CR being reconciled is read from the cache. If the cache lags after the annotation is saved, a retry can search by title again and create a second issue. Proposed fix, not applied: at the start of `linkIssue`, re-read the CR through `apiReader()` and stop if it already has the annotation.
-- The e2e test doesn't create `github-token-secret`, so the manager pod can't start in the e2e cluster.
 - [config/samples/github_v1alpha1_githubissue.yaml](config/samples/github_v1alpha1_githubissue.yaml) still has an empty spec.
 
 ## Commands
@@ -55,17 +54,19 @@ Open items:
 make manifests generate   # after editing *_types.go or kubebuilder markers
 make build                # bin/manager
 make lint / make lint-fix # golangci-lint (custom build config in .custom-gcl.yml)
-make test                 # envtest-based unit tests (excludes test/e2e)
+make test                 # unit tests for the GitHub client and utils (excludes test/e2e)
 make run                  # run locally against the current kubeconfig; needs GITHUB_TOKEN exported
-make test-e2e             # creates Kind cluster "githubissue-operator-assignment-shviro-test-e2e", runs, and deletes it
+make test-e2e             # creates Kind cluster "githubissue-operator-assignment-shviro-test-e2e", runs test/e2e (including the controller tests), and deletes it
 ```
 
-Run a single test or package. `make test` or `make setup-envtest` must have run once first so the envtest binaries exist in `bin/`:
+Run a single controller test. `make test` or `make setup-envtest` must have run once first so the envtest binaries exist in `bin/`. The e2e `BeforeSuite` still runs first: it builds the manager image with Docker and loads it into the Kind cluster named by `KIND_CLUSTER` (default `kind`), and it installs cert-manager into the current kubectl context unless `CERT_MANAGER_INSTALL_SKIP=true`:
 
 ```bash
-KUBEBUILDER_ASSETS="$(bin/setup-envtest-* use -p path --bin-dir bin)" \
-  go test ./internal/controller/... -ginkgo.focus="should close the GitHub issue"
+KUBEBUILDER_ASSETS="$(bin/setup-envtest-* use -p path --bin-dir bin)" KIND_CLUSTER=<kind-cluster> CERT_MANAGER_INSTALL_SKIP=true \
+  go test -tags=e2e ./test/e2e/ -ginkgo.focus="should close the GitHub issue"
 ```
+
+The e2e `BeforeAll` creates `github-token-secret` with a dummy token; the "Manager" tests create no CRs, so nothing calls GitHub. The metrics Service is named `metrics-service` because, with the kustomize `namePrefix`, the scaffold's `controller-manager-metrics-service` was 73 characters, over the 63-character limit for Service names.
 
 `make lint` can't load packages under Go 1.27 (golangci-lint v2.11.4). The dev container pins Go 1.25 like `go.mod` and CI; with a newer local Go, run `GOTOOLCHAIN=go1.25.7 make lint`.
 

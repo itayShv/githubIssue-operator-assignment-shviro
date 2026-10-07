@@ -159,7 +159,7 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
 - Calls go through the small REST client in [internal/controller/github/client.go](../internal/controller/github/client.go), using `net/http` (no client library).
 - The token comes from the `GITHUB_TOKEN` environment variable, which the Deployment fills from Secret `github-token-secret`, key `GITHUB_TOKEN`. The manager exits at startup if it is missing.
 - The API version is pinned with the `X-GitHub-Api-Version` header to `2026-03-10`. None of that version's breaking changes affect the fields this operator reads. The older `2022-11-28` version is supported until at least March 2028.
-- A 404 is returned as `github.ErrNotFound`, a 410 as `github.ErrGone` and a 301 as `github.ErrMoved`, all wrapped with the repository or issue they refer to; check them with `errors.Is`. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)). Other non-2xx responses become errors that include GitHub's message.
+- A 404 is returned as `utils.ErrNotFound`, a 410 as `utils.ErrGone` and a 301 as `utils.ErrMoved`, all wrapped with the repository or issue they refer to; check them with `errors.Is`. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)). Other non-2xx responses become errors that include GitHub's message.
 
 | Operation | Endpoint |
 |---|---|
@@ -200,7 +200,7 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
   - Finalizer helpers.
   - `handleDelete` and `handleUpdate`, following the rules above, including the `Ready`, `IssueOpen` and `IssueHasPR` conditions and the 1-minute requeue.
   - Tests, none of which call the real GitHub:
-    - [githubissue_controller_test.go](../internal/controller/githubissue_controller_test.go): the four unit tests the assignment requires (create when missing, create fails, update fails, close on delete), plus deleted, moved and not-found issues and duplicate CRs. They run on envtest against an in-memory fake GitHub server.
+    - [githubissue_controller_test.go](../test/e2e/githubissue_controller_test.go): the four cases the assignment requires (create when missing, create fails, update fails, close on delete), plus deleted, moved and not-found issues and duplicate CRs. They run on envtest against an in-memory fake GitHub server, as part of the e2e suite (`make test-e2e`), not `make test`.
     - [client_test.go](../internal/controller/github/client_test.go): the GitHub client's requests, paging, error mapping and pull-request counting.
     - [utils_test.go](../internal/controller/utils/utils_test.go): the linking rules: copied annotations, title claims and ordering by age.
 - **Open:**

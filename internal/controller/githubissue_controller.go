@@ -69,48 +69,50 @@ func (r *GithubIssueReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, &gitHubIssueCR); err != nil {
 		logger.Info("Couldnt find Github Issue CR:" + req.Name)
 		if apierrors.IsNotFound(err) {
-			// Normal right after a delete: the finalizer was removed and the CR is gone
 			logger.Info("GithubIssue was deleted, nothing to do")
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	if !gitHubIssueCR.DeletionTimestamp.IsZero() {
-		return r.handleDelete(ctx, &gitHubIssueCR)
+		return ctrl.Result{}, r.handleDelete(ctx, &gitHubIssueCR)
 	}
 
 	if err := finalizer.Ensure(ctx, &gitHubIssueCR, r.Client); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to ensure finalizer in GitHub issue CR: %s", err.Error())
 	}
 
-	return r.handleUpdate(ctx, &gitHubIssueCR)
+	if err := r.handleUpdate(ctx, &gitHubIssueCR); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: utils.ResyncPeriod}, nil
 }
 
-func (r *GithubIssueReconciler) handleDelete(ctx context.Context, cr *githubv1alpha1.GithubIssue) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) handleDelete(ctx context.Context, cr *githubv1alpha1.GithubIssue) error {
 	logger := logf.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(cr, utils.GitHubIssueDeletionFinalizer) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	number, ok, err := utils.ManagedIssueNumber(ctx, r.Client, cr)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if !ok {
 		logger.Info("GithubIssue does not manage a GitHub issue, skipping issue close", "name", cr.Name)
 	} else {
 		owner, repo, err := utils.ParseRepoURL(cr.Spec.Repo)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
-		err = r.githubClient().CloseIssue(ctx, owner, repo, number)
+		err = github.NewClient(r.GitHubAPIURL, r.GitHubToken).CloseIssue(ctx, owner, repo, number)
 		switch {
-		case errors.Is(err, github.ErrNotFound), errors.Is(err, github.ErrGone), errors.Is(err, github.ErrMoved):
+		case errors.Is(err, utils.ErrNotFound), errors.Is(err, utils.ErrGone), errors.Is(err, utils.ErrMoved):
 			logger.Info("GitHub issue was not found, deleted or moved, nothing to close", "error", err.Error())
 		case err != nil:
 			logger.Error(err, "Failed to close GitHub issue", "number", number)
-			return ctrl.Result{}, err
+			return err
 		default:
 			logger.Info("Closed GitHub issue", "number", number)
 		}
@@ -118,13 +120,13 @@ func (r *GithubIssueReconciler) handleDelete(ctx context.Context, cr *githubv1al
 
 	// Remove the finalizer so Kubernetes can delete the CR
 	if err := finalizer.Remove(ctx, cr, r.Client); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	logger.Info("Removed finalizer from GithubIssue", "name", cr.Name)
-	return ctrl.Result{}, nil
+	return nil
 }
 
-func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1alpha1.GithubIssue) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1alpha1.GithubIssue) error {
 	logger := logf.FromContext(ctx)
 	// handle create or edit event
 	logger.Info("Starting Update procedure for GithubIssue", "name", cr.Name, "repo", cr.Spec.Repo, "title", cr.Spec.Title)
@@ -134,7 +136,7 @@ func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1al
 	if err != nil {
 		return r.fail(ctx, cr, err)
 	}
-	gh := r.githubClient()
+	gh := github.NewClient(r.GitHubAPIURL, r.GitHubToken)
 
 	// Find the issue this CR manages
 	number, linked, err := utils.ManagedIssueNumber(ctx, r.Client, cr)
@@ -145,16 +147,18 @@ func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1al
 	if linked {
 		issue, err = gh.GetIssue(ctx, owner, repo, number)
 		switch {
-		case errors.Is(err, github.ErrGone), errors.Is(err, github.ErrMoved):
+		case err == nil:
+			break
+		case errors.Is(err, utils.ErrGone), errors.Is(err, utils.ErrMoved):
 			// Keep the annotation, so the CR keeps its claim on the title and no other CR recreates the issue.
 			// A moved issue is treated as deleted, since the CR tracks its issue by repo and number.
 			logger.Info("GitHub issue was deleted or moved", "number", number, "error", err.Error())
 			return r.setIssueMissingStatus(ctx, cr, number, err)
-		case errors.Is(err, github.ErrNotFound):
+		case errors.Is(err, utils.ErrNotFound):
 			// Often a token or access problem, so keep the annotation and report it
 			logger.Info("GitHub issue was not found", "number", number, "error", err.Error())
 			return r.setIssueMissingStatus(ctx, cr, number, err)
-		case err != nil:
+		default:
 			return r.fail(ctx, cr, err)
 		}
 	} else {
@@ -257,7 +261,7 @@ func pullRequestCondition(cr *githubv1alpha1.GithubIssue, linked bool) metav1.Co
 
 // setSyncedStatus reports a CR in sync with its issue: Ready is True, IssueOpen follows the issue's state,
 // and IssueHasPR says whether a pull request is linked.
-func (r *GithubIssueReconciler) setSyncedStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, issue *github.IssueResponse, hasPR bool) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) setSyncedStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, issue *github.IssueResponse, hasPR bool) error {
 	ready := condition(cr, utils.ConditionReady, metav1.ConditionTrue, utils.ReasonSynced, fmt.Sprintf("Managing GitHub issue #%d", issue.Number))
 	open := condition(cr, utils.ConditionIssueOpen, metav1.ConditionTrue, utils.ReasonOpen, fmt.Sprintf("GitHub issue #%d is open", issue.Number))
 	if issue.State == utils.GitHubIssueStateClosed {
@@ -268,21 +272,21 @@ func (r *GithubIssueReconciler) setSyncedStatus(ctx context.Context, cr *githubv
 
 // setDuplicateStatus reports a CR that waits because blocker comes first for its repo and title.
 // It manages no issue, so only Ready is set.
-func (r *GithubIssueReconciler) setDuplicateStatus(ctx context.Context, cr, blocker *githubv1alpha1.GithubIssue) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) setDuplicateStatus(ctx context.Context, cr, blocker *githubv1alpha1.GithubIssue) error {
 	msg := fmt.Sprintf("GithubIssue %s/%s comes first for this repo and title", blocker.Namespace, blocker.Name)
 	return r.setStatus(ctx, cr, condition(cr, utils.ConditionReady, metav1.ConditionFalse, utils.ReasonDuplicateIssue, msg))
 }
 
 // setIssueMissingStatus reports a managed issue that GitHub can't return: deleted or moved (410, 301),
 // or not found (404).
-func (r *GithubIssueReconciler) setIssueMissingStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, number int, err error) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) setIssueMissingStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, number int, err error) error {
 	readyReason, reason, open := utils.ReasonIssueDeleted, utils.ReasonDeleted, metav1.ConditionFalse
 	msg := fmt.Sprintf("GitHub issue #%d was deleted", number)
 	switch {
-	case errors.Is(err, github.ErrMoved):
+	case errors.Is(err, utils.ErrMoved):
 		msg = fmt.Sprintf("GitHub issue #%d was moved (transferred to another repository, "+
 			"or its repository was renamed or transferred)", number)
-	case errors.Is(err, github.ErrNotFound):
+	case errors.Is(err, utils.ErrNotFound):
 		readyReason, reason, open = utils.ReasonIssueNotFound, utils.ReasonNotFound, metav1.ConditionUnknown
 		msg = err.Error()
 	}
@@ -292,10 +296,9 @@ func (r *GithubIssueReconciler) setIssueMissingStatus(ctx context.Context, cr *g
 		condition(cr, utils.ConditionIssueHasPR, metav1.ConditionUnknown, reason, msg))
 }
 
-// setStatus sets the Ready condition and the issue conditions (IssueOpen, IssueHasPR), saves the status
-// if anything changed, and requeues after the resync period. With no issue conditions the CR manages
-// no issue, so they are removed.
-func (r *GithubIssueReconciler) setStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, ready metav1.Condition, issueConditions ...metav1.Condition) (ctrl.Result, error) {
+// setStatus sets the Ready condition and the issue conditions (IssueOpen, IssueHasPR), and saves the status
+// if anything changed. With no issue conditions the CR manages no issue, so they are removed.
+func (r *GithubIssueReconciler) setStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, ready metav1.Condition, issueConditions ...metav1.Condition) error {
 	changed := meta.SetStatusCondition(&cr.Status.Conditions, ready)
 	if len(issueConditions) == 0 {
 		// The CR manages no issue: remove the conditions left from an issue it managed before
@@ -310,21 +313,21 @@ func (r *GithubIssueReconciler) setStatus(ctx context.Context, cr *githubv1alpha
 
 	if changed {
 		if err := r.Status().Update(ctx, cr); err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
-	return ctrl.Result{RequeueAfter: utils.ResyncPeriod}, nil
+	return nil
 }
 
 // fail records err in the Ready condition and returns it, so the reconcile is retried with backoff.
-func (r *GithubIssueReconciler) fail(ctx context.Context, cr *githubv1alpha1.GithubIssue, err error) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) fail(ctx context.Context, cr *githubv1alpha1.GithubIssue, err error) error {
 	ready := condition(cr, utils.ConditionReady, metav1.ConditionFalse, utils.ReasonReconcileFailed, err.Error())
 	if meta.SetStatusCondition(&cr.Status.Conditions, ready) {
 		if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
 			logf.FromContext(ctx).Error(statusErr, "Failed to update GithubIssue status", "name", cr.Name)
 		}
 	}
-	return ctrl.Result{}, err
+	return err
 }
 
 func (r *GithubIssueReconciler) apiReader() client.Reader {
@@ -332,10 +335,6 @@ func (r *GithubIssueReconciler) apiReader() client.Reader {
 		return r.APIReader
 	}
 	return r.Client
-}
-
-func (r *GithubIssueReconciler) githubClient() *github.Client {
-	return github.NewClient(r.GitHubAPIURL, r.GitHubToken)
 }
 
 // SetupWithManager sets up the controller with the Manager.

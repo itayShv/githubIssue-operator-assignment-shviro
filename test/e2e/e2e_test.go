@@ -40,7 +40,7 @@ const namespace = "githubissue-operator-assignment-shviro-system"
 const serviceAccountName = "githubissue-operator-assignment-shviro-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "githubissue-operator-assignment-shviro-controller-manager-metrics-service"
+const metricsServiceName = "githubissue-operator-assignment-shviro-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "githubissue-operator-assignment-shviro-metrics-binding"
@@ -62,6 +62,12 @@ var _ = Describe("Manager", Ordered, func() {
 			"pod-security.kubernetes.io/enforce=restricted")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+		By("creating the GitHub token secret the manager reads GITHUB_TOKEN from")
+		cmd = exec.Command("kubectl", "create", "secret", "generic", "github-token-secret",
+			"-n", namespace, "--from-literal=GITHUB_TOKEN=e2e-dummy-token")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create the GitHub token secret")
 
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")

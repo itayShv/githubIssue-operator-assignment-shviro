@@ -1,10 +1,11 @@
 package utils
 
 import (
+	"testing"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,136 +22,193 @@ const (
 	testTitle    = "Login bug"
 )
 
-var _ = Describe("ParseRepoURL", func() {
-	DescribeTable("should split a repository URL into owner and repo",
-		func(url, owner, repo string) {
-			gotOwner, gotRepo, err := ParseRepoURL(url)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(gotOwner).To(Equal(owner))
-			Expect(gotRepo).To(Equal(repo))
+func TestParseRepoURL(t *testing.T) {
+	tests := []struct {
+		name          string
+		url           string
+		expectedOwner string
+		expectedRepo  string
+		expectedErr   bool
+	}{
+		{name: "plain", url: "https://github.com/itay/foo", expectedOwner: "itay", expectedRepo: "foo", expectedErr: false},
+		{name: "with a trailing slash", url: "https://github.com/dana-team/bar/", expectedOwner: "dana-team", expectedRepo: "bar", expectedErr: false},
+		{name: "owner only", url: "https://github.com/itay", expectedOwner: "", expectedRepo: "", expectedErr: true},
+		{name: "a page inside the repository", url: "https://github.com/itay/foo/issues", expectedOwner: "", expectedRepo: "", expectedErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, err := ParseRepoURL(tt.url)
+			if tt.expectedErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectedOwner, owner)
+			assert.Equal(t, tt.expectedRepo, repo)
+		})
+	}
+}
+
+func TestSameRepo(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        string
+		b        string
+		expected bool
+	}{
+		{name: "identical", a: otherRepoURL, b: otherRepoURL, expected: true},
+		{name: "different letter case and a trailing slash", a: repoURL, b: "https://github.com/Test-Owner/Test-Repo/", expected: true},
+		{name: "another repository", a: repoURL, b: otherRepoURL, expected: false},
+		{name: "an invalid URL", a: repoURL, b: "https://github.com/test-owner", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, SameRepo(tt.a, tt.b))
+		})
+	}
+}
+
+func TestIsOlder(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        *githubv1alpha1.GithubIssue
+		b        *githubv1alpha1.GithubIssue
+		expected bool
+	}{
+		{
+			name:     "earlier creation time, even with a later name",
+			a:        newCR("b", repoURL, testTitle, 0, ""),
+			b:        newCR("a", repoURL, testTitle, 1, ""),
+			expected: true,
 		},
-		Entry("plain", "https://github.com/itay/foo", "itay", "foo"),
-		Entry("with a trailing slash", "https://github.com/dana-team/bar/", "dana-team", "bar"),
-	)
-
-	DescribeTable("should reject a URL that isn't a repository",
-		func(url string) {
-			_, _, err := ParseRepoURL(url)
-			Expect(err).To(HaveOccurred())
+		{
+			name:     "later creation time, even with an earlier name",
+			a:        newCR("a", repoURL, testTitle, 1, ""),
+			b:        newCR("b", repoURL, testTitle, 0, ""),
+			expected: false,
 		},
-		Entry("owner only", "https://github.com/itay"),
-		Entry("a page inside the repository", "https://github.com/itay/foo/issues"),
-	)
-})
-
-var _ = Describe("SameRepo", func() {
-	DescribeTable("should compare owner and repo, ignoring letter case and a trailing slash",
-		func(a, b string, same bool) {
-			Expect(SameRepo(a, b)).To(Equal(same))
+		{
+			name:     "same creation time, earlier namespace/name",
+			a:        newCR("b", repoURL, testTitle, 0, ""),
+			b:        newCR("c", repoURL, testTitle, 0, ""),
+			expected: true,
 		},
-		Entry("identical", otherRepoURL, otherRepoURL, true),
-		Entry("different letter case and a trailing slash", repoURL, "https://github.com/Test-Owner/Test-Repo/", true),
-		Entry("another repository", repoURL, otherRepoURL, false),
-		Entry("an invalid URL", repoURL, "https://github.com/test-owner", false),
-	)
-})
-
-var _ = Describe("IsOlder", func() {
-	It("should compare creation times", func() {
-		a, b := newCR("a", repoURL, testTitle, 0, ""), newCR("b", repoURL, testTitle, 1, "")
-		Expect(IsOlder(a, b)).To(BeTrue())
-		Expect(IsOlder(b, a)).To(BeFalse())
-	})
-
-	It("should compare namespace/name when the creation times are equal", func() {
-		a, b := newCR("b", repoURL, testTitle, 0, ""), newCR("c", repoURL, testTitle, 0, "")
-		Expect(IsOlder(a, b)).To(BeTrue())
-		Expect(IsOlder(b, a)).To(BeFalse())
-	})
-})
-
-var _ = Describe("ManagedIssueNumber", func() {
-	DescribeTable("should not count a missing or invalid annotation",
-		func(annotation string) {
-			cr := newCR("cr", repoURL, testTitle, 0, annotation)
-			_, ok, err := ManagedIssueNumber(ctx, readerWith(cr), cr)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ok).To(BeFalse())
+		{
+			name:     "same creation time, later namespace/name",
+			a:        newCR("c", repoURL, testTitle, 0, ""),
+			b:        newCR("b", repoURL, testTitle, 0, ""),
+			expected: false,
 		},
-		Entry("missing", ""),
-		Entry("not a number", "abc"),
-		Entry("zero", "0"),
-		Entry("negative", "-3"),
-	)
+	}
 
-	It("should return the issue the CR manages", func() {
-		cr := newCR("cr", repoURL, testTitle, 1, "42")
-		newerCopy := newCR("newer-copy", repoURL, testTitle, 2, "42")
-		olderOtherRepo := newCR("older-other-repo", otherRepoURL, testTitle, 0, "42")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsOlder(tt.a, tt.b))
+		})
+	}
+}
 
-		number, ok, err := ManagedIssueNumber(ctx, readerWith(cr, newerCopy, olderOtherRepo), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ok).To(BeTrue())
-		Expect(number).To(Equal(42))
-	})
+func TestManagedIssueNumber(t *testing.T) {
+	tests := []struct {
+		name           string
+		cr             *githubv1alpha1.GithubIssue
+		others         []*githubv1alpha1.GithubIssue
+		expectedNumber int
+		expectedOK     bool
+	}{
+		{name: "no annotation", cr: newCR("cr", repoURL, testTitle, 0, ""), expectedNumber: 0, expectedOK: false},
+		{name: "annotation isn't a number", cr: newCR("cr", repoURL, testTitle, 0, "abc"), expectedNumber: 0, expectedOK: false},
+		{name: "annotation is zero", cr: newCR("cr", repoURL, testTitle, 0, "0"), expectedNumber: 0, expectedOK: false},
+		{name: "annotation is negative", cr: newCR("cr", repoURL, testTitle, 0, "-3"), expectedNumber: 0, expectedOK: false},
+		{
+			name: "manages the issue when only newer CRs and other repos have the number",
+			cr:   newCR("cr", repoURL, testTitle, 1, "42"),
+			others: []*githubv1alpha1.GithubIssue{
+				newCR("newer-copy", repoURL, testTitle, 2, "42"),
+				newCR("older-other-repo", otherRepoURL, testTitle, 0, "42"),
+			},
+			expectedNumber: 42,
+			expectedOK:     true,
+		},
+		{
+			name:           "annotation is a copy when an older CR has the same repo and number",
+			cr:             newCR("cr", repoURL, testTitle, 1, "42"),
+			others:         []*githubv1alpha1.GithubIssue{newCR("original", repoURL, testTitle, 0, "42")},
+			expectedNumber: 0,
+			expectedOK:     false,
+		},
+	}
 
-	It("should treat the annotation as a copy when an older CR has the same repo and number", func() {
-		original := newCR("original", repoURL, testTitle, 0, "42")
-		cr := newCR("cr", repoURL, testTitle, 1, "42")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			number, ok, err := ManagedIssueNumber(t.Context(), readerWith(tt.cr, tt.others...), tt.cr)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedNumber, number)
+			assert.Equal(t, tt.expectedOK, ok)
+		})
+	}
+}
 
-		_, ok, err := ManagedIssueNumber(ctx, readerWith(original, cr), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ok).To(BeFalse())
-	})
-})
+func TestCheckTitleClaim(t *testing.T) {
+	tests := []struct {
+		name            string
+		cr              *githubv1alpha1.GithubIssue
+		others          []*githubv1alpha1.GithubIssue
+		expectedBlocker string
+		expectedClaimed map[int]bool
+	}{
+		{
+			name: "no blocker when the others are newer and unlinked, or have another title or repo",
+			cr:   newCR("cr", repoURL, testTitle, 1, ""),
+			others: []*githubv1alpha1.GithubIssue{
+				newCR("newer-same-title", repoURL, testTitle, 2, ""),
+				newCR("other-title", repoURL, "Other", 0, "7"),
+				newCR("other-repo", otherRepoURL, testTitle, 0, "8"),
+			},
+			expectedBlocker: "",
+			expectedClaimed: map[int]bool{7: true},
+		},
+		{
+			name:            "a linked CR with the same title blocks, even a newer one",
+			cr:              newCR("cr", repoURL, testTitle, 0, ""),
+			others:          []*githubv1alpha1.GithubIssue{newCR("linked", repoURL, testTitle, 1, "42")},
+			expectedBlocker: "default/linked",
+			expectedClaimed: map[int]bool{42: true},
+		},
+		{
+			name:            "an older CR with the same title blocks, even if it isn't linked yet",
+			cr:              newCR("cr", repoURL, testTitle, 1, ""),
+			others:          []*githubv1alpha1.GithubIssue{newCR("older", repoURL, testTitle, 0, "")},
+			expectedBlocker: "default/older",
+			expectedClaimed: map[int]bool{},
+		},
+		{
+			name: "the oldest blocker wins, in any namespace",
+			cr:   newCR("cr", repoURL, testTitle, 2, ""),
+			others: []*githubv1alpha1.GithubIssue{
+				newCR("linked", repoURL, testTitle, 1, "42"),
+				func() *githubv1alpha1.GithubIssue {
+					cr := newCR("oldest", repoURL, testTitle, 0, "")
+					cr.Namespace = "team2"
+					return cr
+				}(),
+			},
+			expectedBlocker: "team2/oldest",
+			expectedClaimed: map[int]bool{42: true},
+		},
+	}
 
-var _ = Describe("CheckTitleClaim", func() {
-	It("should let a CR link when no CR comes first, and return the issues other CRs manage", func() {
-		cr := newCR("cr", repoURL, testTitle, 1, "")
-		newerSameTitle := newCR("newer-same-title", repoURL, testTitle, 2, "")
-		otherTitle := newCR("other-title", repoURL, "Other", 0, "7")
-		otherRepo := newCR("other-repo", otherRepoURL, testTitle, 0, "8")
-
-		blocker, claimed, err := CheckTitleClaim(ctx, readerWith(cr, newerSameTitle, otherTitle, otherRepo), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(blocker).To(BeNil())
-		Expect(claimed).To(Equal(map[int]bool{7: true}))
-	})
-
-	It("should block a CR when a CR with the same title is linked, even a newer one", func() {
-		cr := newCR("cr", repoURL, testTitle, 0, "")
-		linked := newCR("linked", repoURL, testTitle, 1, "42")
-
-		blocker, claimed, err := CheckTitleClaim(ctx, readerWith(cr, linked), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(blocker).NotTo(BeNil())
-		Expect(blocker.Name).To(Equal("linked"))
-		Expect(claimed).To(Equal(map[int]bool{42: true}))
-	})
-
-	It("should block a CR when an older CR with the same title isn't linked yet", func() {
-		older := newCR("older", repoURL, testTitle, 0, "")
-		cr := newCR("cr", repoURL, testTitle, 1, "")
-
-		blocker, claimed, err := CheckTitleClaim(ctx, readerWith(older, cr), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(blocker).NotTo(BeNil())
-		Expect(blocker.Name).To(Equal("older"))
-		Expect(claimed).To(BeEmpty())
-	})
-
-	It("should look in every namespace and return the oldest blocker", func() {
-		cr := newCR("cr", repoURL, testTitle, 2, "")
-		linked := newCR("linked", repoURL, testTitle, 1, "42")
-		oldest := newCR("oldest", repoURL, testTitle, 0, "")
-		oldest.Namespace = "team2"
-
-		blocker, _, err := CheckTitleClaim(ctx, readerWith(cr, linked, oldest), cr)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(blocker).NotTo(BeNil())
-		Expect(blocker.Namespace + "/" + blocker.Name).To(Equal("team2/oldest"))
-	})
-})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blocker, claimed, err := CheckTitleClaim(t.Context(), readerWith(tt.cr, tt.others...), tt.cr)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedBlocker, namespacedName(blocker))
+			assert.Equal(t, tt.expectedClaimed, claimed)
+		})
+	}
+}
 
 // start is the creation time of the oldest CR in these tests.
 var start = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -180,11 +238,20 @@ func newCR(name, repo, title string, minute int, annotation string) *githubv1alp
 	return cr
 }
 
-// readerWith returns a reader that holds the given CRs, like the controller's cache or API reader.
-func readerWith(crs ...*githubv1alpha1.GithubIssue) client.Reader {
-	objs := make([]client.Object, 0, len(crs))
-	for _, cr := range crs {
-		objs = append(objs, cr)
+// readerWith returns a reader that holds cr and the other CRs, like the controller's cache or API reader.
+func readerWith(cr *githubv1alpha1.GithubIssue, others ...*githubv1alpha1.GithubIssue) client.Reader {
+	objs := make([]client.Object, 0, 1+len(others))
+	objs = append(objs, cr)
+	for _, other := range others {
+		objs = append(objs, other)
 	}
 	return fake.NewClientBuilder().WithScheme(testScheme).WithObjects(objs...).Build()
+}
+
+// namespacedName returns the namespace/name of cr, or "" for nil.
+func namespacedName(cr *githubv1alpha1.GithubIssue) string {
+	if cr == nil {
+		return ""
+	}
+	return client.ObjectKeyFromObject(cr).String()
 }

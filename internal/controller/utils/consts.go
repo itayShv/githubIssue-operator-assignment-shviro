@@ -1,7 +1,10 @@
 // Package utils holds the constants and helpers shared by the controller and the GitHub client.
 package utils
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // Names this operator sets on GithubIssue CRs.
 const (
@@ -31,6 +34,19 @@ const (
 	// Issue timeline events for linking and unlinking a pull request from the issue's "Development" sidebar.
 	GitHubEventConnected    = "connected"
 	GitHubEventDisconnected = "disconnected"
+)
+
+// Errors the GitHub client returns for GitHub's 404, 410 and 301 answers. Check them with errors.Is.
+var (
+	// ErrNotFound is returned (wrapped with the repo or issue details) when GitHub answers 404:
+	// the repo or issue doesn't exist, or the token can't see it.
+	ErrNotFound = errors.New("not found")
+	// ErrGone is returned (wrapped with the repo or issue details) when GitHub answers 410:
+	// the issue was deleted, or issues are disabled in the repository.
+	ErrGone = errors.New("gone (deleted, or issues are disabled in the repository)")
+	// ErrMoved is returned (wrapped with the repo or issue details) when GitHub answers 301:
+	// the issue was transferred to another repository, or the repository was renamed or transferred.
+	ErrMoved = errors.New("moved (the issue was transferred, or the repository was renamed or transferred)")
 )
 
 // ResyncPeriod is how often every GithubIssue is reconciled against GitHub.
