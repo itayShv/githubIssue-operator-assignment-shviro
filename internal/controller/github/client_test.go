@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -125,8 +126,8 @@ var _ = Describe("Client", func() {
 	})
 
 	Describe("errors", func() {
-		DescribeTable("should return the matching error, naming the issue",
-			func(status int, sentinel error, message string) {
+		DescribeTable("should return GitHub's status code",
+			func(status int) {
 				server.answer(func(w http.ResponseWriter, r *http.Request) {
 					if status == http.StatusMovedPermanently {
 						w.Header().Set("Location", "/elsewhere")
@@ -134,14 +135,12 @@ var _ = Describe("Client", func() {
 					jsonResponse(status, map[string]string{"message": http.StatusText(status)})(w, r)
 				})
 				_, err := client.GetIssue(ctx, owner, repo, 7)
-				Expect(err).To(MatchError(sentinel))
-				Expect(err).To(MatchError(ContainSubstring(message)))
+				Expect(StatusCode(err)).To(Equal(status))
 				Expect(server.requests()).To(HaveLen(1), "redirects must not be followed")
 			},
-			Entry("404", http.StatusNotFound, ErrNotFound, "github issue test-owner/test-repo#7: not found"),
-			Entry("410", http.StatusGone, ErrGone, "github issue test-owner/test-repo#7: gone"),
-			Entry("301, without following the redirect", http.StatusMovedPermanently, ErrMoved,
-				"github issue test-owner/test-repo#7: moved"),
+			Entry("404", http.StatusNotFound),
+			Entry("410", http.StatusGone),
+			Entry("301, without following the redirect", http.StatusMovedPermanently),
 		)
 
 		It("should not follow a redirect when updating an issue", func() {
@@ -150,24 +149,27 @@ var _ = Describe("Client", func() {
 				jsonResponse(http.StatusMovedPermanently, map[string]string{"message": "Moved Permanently"})(w, r)
 			})
 			_, err := client.UpdateIssue(ctx, owner, repo, 7, "Title", "Body")
-			Expect(err).To(MatchError(ErrMoved))
+			Expect(StatusCode(err)).To(Equal(http.StatusMovedPermanently))
 			Expect(server.requests()).To(HaveLen(1), "a followed PATCH would become a GET")
 		})
 
-		It("should name the repository when a repository request fails", func() {
+		It("should keep GitHub's message when a repository request fails", func() {
 			server.answer(jsonResponse(http.StatusGone, map[string]string{"message": "Issues are disabled for this repo"}))
 			_, err := client.FindIssueByTitle(ctx, owner, repo, testTitle, nil)
-			Expect(err).To(MatchError(ErrGone))
-			Expect(err).To(MatchError(ContainSubstring("github repository test-owner/test-repo: gone")))
+			Expect(StatusCode(err)).To(Equal(http.StatusGone))
+			Expect(err).To(MatchError(ContainSubstring("Issues are disabled for this repo")))
 		})
 
 		It("should keep GitHub's message for any other error", func() {
 			server.answer(jsonResponse(http.StatusUnauthorized, map[string]string{"message": "Bad credentials"}))
 			_, err := client.GetIssue(ctx, owner, repo, 7)
 			Expect(err).To(MatchError(ContainSubstring("401 Bad credentials")))
-			Expect(err).NotTo(MatchError(ErrNotFound))
-			Expect(err).NotTo(MatchError(ErrGone))
-			Expect(err).NotTo(MatchError(ErrMoved))
+			Expect(StatusCode(err)).To(Equal(http.StatusUnauthorized))
+		})
+
+		It("should return 0 for errors that aren't answers from GitHub", func() {
+			Expect(StatusCode(nil)).To(BeZero())
+			Expect(StatusCode(errors.New("connection refused"))).To(BeZero())
 		})
 	})
 

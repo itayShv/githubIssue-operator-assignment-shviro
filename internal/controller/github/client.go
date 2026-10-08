@@ -11,18 +11,6 @@ import (
 	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
 
-var (
-	// ErrNotFound is returned (wrapped with the repo or issue details) when GitHub answers 404:
-	// the repo or issue doesn't exist, or the token can't see it.
-	ErrNotFound = errors.New("not found")
-	// ErrGone is returned (wrapped with the repo or issue details) when GitHub answers 410:
-	// the issue was deleted, or issues are disabled in the repository.
-	ErrGone = errors.New("gone (deleted, or issues are disabled in the repository)")
-	// ErrMoved is returned (wrapped with the repo or issue details) when GitHub answers 301:
-	// the issue was transferred to another repository, or the repository was renamed or transferred.
-	ErrMoved = errors.New("moved (the issue was transferred, or the repository was renamed or transferred)")
-)
-
 // Issue is a GitHub issue as go-github returns it. Read its fields with the getters (GetTitle, GetNumber...).
 type Issue = gogithub.Issue
 
@@ -64,7 +52,7 @@ func (c *Client) FindIssueByTitle(ctx context.Context, owner, repo, title string
 	for {
 		issues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
 		if err != nil {
-			return nil, repoError(owner, repo, mapError(err))
+			return nil, err
 		}
 		for _, issue := range issues {
 			// return only issues, not pull requests
@@ -83,7 +71,7 @@ func (c *Client) FindIssueByTitle(ctx context.Context, owner, repo, title string
 func (c *Client) CreateIssue(ctx context.Context, owner, repo, title, body string) (*Issue, error) {
 	issue, _, err := c.gh.Issues.Create(ctx, owner, repo, gogithub.CreateIssueRequest{Title: title, Body: &body})
 	if err != nil {
-		return nil, repoError(owner, repo, mapError(err))
+		return nil, err
 	}
 	return issue, nil
 }
@@ -92,7 +80,7 @@ func (c *Client) CreateIssue(ctx context.Context, owner, repo, title, body strin
 func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (*Issue, error) {
 	issue, _, err := c.gh.Issues.Get(ctx, owner, repo, number)
 	if err != nil {
-		return nil, issueError(owner, repo, number, mapError(err))
+		return nil, err
 	}
 	return issue, nil
 }
@@ -101,7 +89,7 @@ func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (
 func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int, title, body string) (*Issue, error) {
 	issue, _, err := c.gh.Issues.Update(ctx, owner, repo, number, gogithub.UpdateIssueRequest{Title: &title, Body: &body})
 	if err != nil {
-		return nil, issueError(owner, repo, number, mapError(err))
+		return nil, err
 	}
 	return issue, nil
 }
@@ -110,7 +98,7 @@ func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int
 func (c *Client) CloseIssue(ctx context.Context, owner, repo string, number int) error {
 	_, _, err := c.gh.Issues.Update(ctx, owner, repo, number,
 		gogithub.UpdateIssueRequest{State: gogithub.Ptr(utils.GitHubIssueStateClosed)})
-	return issueError(owner, repo, number, mapError(err))
+	return err
 }
 
 // HasLinkedPullRequest reports whether a pull request is linked to the issue from its "Development" sidebar.
@@ -122,7 +110,7 @@ func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, n
 	for {
 		events, resp, err := c.gh.Issues.ListIssueTimeline(ctx, owner, repo, number, opts)
 		if err != nil {
-			return false, issueError(owner, repo, number, mapError(err))
+			return false, err
 		}
 		for _, e := range events {
 			switch e.GetEvent() {
@@ -139,37 +127,17 @@ func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, n
 	}
 }
 
-// mapError turns go-github's errors for 404, 410 and 301 into ErrNotFound, ErrGone and ErrMoved,
-// leaving other errors unchanged.
-func mapError(err error) error {
+// StatusCode returns the HTTP status GitHub answered a failed call with, or 0 if err isn't an answer from
+// GitHub (or is nil). For an issue, 404 means not found, 410 deleted and 301 moved; for a repository,
+// 410 means issues are disabled.
+func StatusCode(err error) int {
 	var redirect *gogithub.RedirectionError
-	if errors.As(err, &redirect) && redirect.StatusCode == http.StatusMovedPermanently {
-		return ErrMoved
+	if errors.As(err, &redirect) {
+		return redirect.StatusCode
 	}
 	var errResp *gogithub.ErrorResponse
 	if errors.As(err, &errResp) && errResp.Response != nil {
-		switch errResp.Response.StatusCode {
-		case http.StatusNotFound:
-			return ErrNotFound
-		case http.StatusGone:
-			return ErrGone
-		}
+		return errResp.Response.StatusCode
 	}
-	return err
-}
-
-// repoError adds the repository to a not-found, gone or moved error, leaving other errors unchanged.
-func repoError(owner, repo string, err error) error {
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
-		return fmt.Errorf("github repository %s/%s: %w", owner, repo, err)
-	}
-	return err
-}
-
-// issueError adds the issue to a not-found, gone or moved error, leaving other errors unchanged.
-func issueError(owner, repo string, number int, err error) error {
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
-		return fmt.Errorf("github issue %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return err
+	return 0
 }

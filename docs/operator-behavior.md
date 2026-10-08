@@ -156,10 +156,10 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
 
 ## GitHub API
 
-- Calls go through [internal/controller/github/client.go](../internal/controller/github/client.go), a thin wrapper around the [go-github](https://github.com/google/go-github) library (v90, the newest release that supports Go 1.25). The wrapper adds the title search, the pull-request check and the error mapping below.
+- Calls go through [internal/controller/github/client.go](../internal/controller/github/client.go), a thin wrapper around the [go-github](https://github.com/google/go-github) library (v90, the newest release that supports Go 1.25). The wrapper adds the title search, the pull-request check and the status-code helper below.
 - The token comes from the `GITHUB_TOKEN` environment variable, which the Deployment fills from Secret `github-token-secret`, key `GITHUB_TOKEN`. The manager exits at startup if it is missing.
 - go-github sends the API version header `X-GitHub-Api-Version: 2022-11-28` and doesn't let a client change it. GitHub supports that version until at least March 2028.
-- A 404 is returned as `github.ErrNotFound`, a 410 as `github.ErrGone` and a 301 as `github.ErrMoved`, all wrapped with the repository or issue they refer to; check them with `errors.Is`. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)): go-github's default HTTP client follows them, so the wrapper passes its own. Other non-2xx responses become go-github errors that include GitHub's message.
+- Errors are go-github's, which include the request and GitHub's message. `github.StatusCode(err)` returns the HTTP status GitHub answered with, or 0 if the error isn't an answer from GitHub; the controller acts on 404, 410 and 301. For an issue, 410 means it was deleted; for a repository, it means issues are disabled. Redirects are not followed (see [Issues deleted or moved on GitHub](#issues-deleted-or-moved-on-github)): go-github's default HTTP client follows them, so the wrapper passes its own.
 
 | Operation | Endpoint |
 |---|---|
@@ -201,7 +201,7 @@ After a repository is renamed, create new CRs with the new URL (`repo` can't be 
   - `handleDelete` and `handleUpdate`, following the rules above, including the `Ready`, `IssueOpen` and `IssueHasPR` conditions and the 1-minute requeue.
   - Tests, none of which call the real GitHub:
     - [githubissue_controller_test.go](../internal/controller/githubissue_controller_test.go): the four unit tests the assignment requires (create when missing, create fails, update fails, close on delete), plus deleted, moved and not-found issues and duplicate CRs. They run on envtest against an in-memory fake GitHub server.
-    - [client_test.go](../internal/controller/github/client_test.go): the GitHub client's requests, paging, error mapping and pull-request counting.
+    - [client_test.go](../internal/controller/github/client_test.go): the GitHub client's requests, paging, status codes and pull-request counting.
     - [utils_test.go](../internal/controller/utils/utils_test.go): the linking rules: copied annotations, title claims and ordering by age.
 - **Open:**
   - Pull requests linked with a closing keyword aren't detected (see [how "linked" is detected](#status-conditions)). A REST-only fix was proposed: count `cross-referenced` events from pull requests whose current description has a closing keyword for the issue. It is on hold.

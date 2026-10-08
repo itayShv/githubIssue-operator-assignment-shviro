@@ -18,8 +18,8 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -109,8 +109,8 @@ func (r *GithubIssueReconciler) handleDelete(ctx context.Context, cr *githubv1al
 			return ctrl.Result{}, err
 		}
 		err = gh.CloseIssue(ctx, owner, repo, number)
-		switch {
-		case errors.Is(err, github.ErrNotFound), errors.Is(err, github.ErrGone), errors.Is(err, github.ErrMoved):
+		switch status := github.StatusCode(err); {
+		case status == http.StatusNotFound, status == http.StatusGone, status == http.StatusMovedPermanently:
 			logger.Info("GitHub issue was not found, deleted or moved, nothing to close", "error", err.Error())
 		case err != nil:
 			logger.Error(err, "Failed to close GitHub issue", "number", number)
@@ -151,16 +151,16 @@ func (r *GithubIssueReconciler) handleUpdate(ctx context.Context, cr *githubv1al
 	var issue *github.Issue
 	if linked {
 		issue, err = gh.GetIssue(ctx, owner, repo, number)
-		switch {
-		case errors.Is(err, github.ErrGone), errors.Is(err, github.ErrMoved):
+		switch status := github.StatusCode(err); {
+		case status == http.StatusGone, status == http.StatusMovedPermanently:
 			// Keep the annotation, so the CR keeps its claim on the title and no other CR recreates the issue.
 			// A moved issue is treated as deleted, since the CR tracks its issue by repo and number.
 			logger.Info("GitHub issue was deleted or moved", "number", number, "error", err.Error())
-			return r.setIssueMissingStatus(ctx, cr, number, err)
-		case errors.Is(err, github.ErrNotFound):
+			return r.setIssueMissingStatus(ctx, cr, number, status)
+		case status == http.StatusNotFound:
 			// Often a token or access problem, so keep the annotation and report it
 			logger.Info("GitHub issue was not found", "number", number, "error", err.Error())
-			return r.setIssueMissingStatus(ctx, cr, number, err)
+			return r.setIssueMissingStatus(ctx, cr, number, status)
 		case err != nil:
 			return r.fail(ctx, cr, err)
 		}
@@ -283,16 +283,16 @@ func (r *GithubIssueReconciler) setDuplicateStatus(ctx context.Context, cr, bloc
 
 // setIssueMissingStatus reports a managed issue that GitHub can't return: deleted or moved (410, 301),
 // or not found (404).
-func (r *GithubIssueReconciler) setIssueMissingStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, number int, err error) (ctrl.Result, error) {
+func (r *GithubIssueReconciler) setIssueMissingStatus(ctx context.Context, cr *githubv1alpha1.GithubIssue, number, status int) (ctrl.Result, error) {
 	readyReason, reason, open := utils.ReasonIssueDeleted, utils.ReasonDeleted, metav1.ConditionFalse
 	msg := fmt.Sprintf("GitHub issue #%d was deleted", number)
-	switch {
-	case errors.Is(err, github.ErrMoved):
+	switch status {
+	case http.StatusMovedPermanently:
 		msg = fmt.Sprintf("GitHub issue #%d was moved (transferred to another repository, "+
 			"or its repository was renamed or transferred)", number)
-	case errors.Is(err, github.ErrNotFound):
+	case http.StatusNotFound:
 		readyReason, reason, open = utils.ReasonIssueNotFound, utils.ReasonNotFound, metav1.ConditionUnknown
-		msg = err.Error()
+		msg = fmt.Sprintf("GitHub issue #%d was not found: it doesn't exist, or the token can't see it", number)
 	}
 	return r.setStatus(ctx, cr,
 		condition(cr, utils.ConditionReady, metav1.ConditionFalse, readyReason, msg),
