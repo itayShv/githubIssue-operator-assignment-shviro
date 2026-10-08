@@ -156,7 +156,7 @@ var _ = Describe("GithubIssue Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("checking the issue was closed and the CR is gone")
-		Expect(fakeGH.issue(1).State).To(Equal(utils.GitHubIssueStateClosed))
+		Expect(fakeGH.issue(1).State).To(Equal(github.GitHubIssueStateClosed))
 		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &githubv1alpha1.GithubIssue{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})

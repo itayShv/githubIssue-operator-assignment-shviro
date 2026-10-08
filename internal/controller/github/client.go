@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
 
 // IssueResponse is the subset of the GitHub issue fields the operator uses.
@@ -46,15 +44,15 @@ type Client struct {
 // NewClient returns a Client for the given token. An empty baseURL means api.github.com.
 func NewClient(baseURL, token string) *Client {
 	if baseURL == "" {
-		baseURL = utils.GitHubAPIBaseURL
+		baseURL = GitHubAPIBaseURL
 	}
 	return &Client{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
-			Timeout: utils.GitHubHTTPTimeout,
+			Timeout: GitHubHTTPTimeout,
 			// Don't follow redirects: Go turns a redirected PATCH into a GET, so updates and closes would
-			// silently do nothing. A moved issue or repository is returned as utils.ErrMoved instead.
+			// silently do nothing. A moved issue or repository is returned as ErrMoved instead.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
@@ -65,7 +63,7 @@ func NewClient(baseURL, token string) *Client {
 func (c *Client) FindIssueByTitle(ctx context.Context, owner, repo, title string, skip map[int]bool) (*IssueResponse, error) {
 	for page := 1; ; page++ {
 		path := fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=%d&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), utils.GitHubPageSize, page)
+			url.PathEscape(owner), url.PathEscape(repo), GitHubPageSize, page)
 		var issues []IssueResponse
 		if err := c.do(ctx, http.MethodGet, path, nil, &issues); err != nil {
 			return nil, repoError(owner, repo, err)
@@ -115,7 +113,7 @@ func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int
 // CloseIssue sets the issue state to closed.
 func (c *Client) CloseIssue(ctx context.Context, owner, repo string, number int) error {
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	err := c.do(ctx, http.MethodPatch, path, issueRequest{State: utils.GitHubIssueStateClosed}, nil)
+	err := c.do(ctx, http.MethodPatch, path, issueRequest{State: GitHubIssueStateClosed}, nil)
 	return issueError(owner, repo, number, err)
 }
 
@@ -126,21 +124,21 @@ func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, n
 	linked := 0
 	for page := 1; ; page++ {
 		path := fmt.Sprintf("/repos/%s/%s/issues/%d/timeline?per_page=%d&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), number, utils.GitHubPageSize, page)
+			url.PathEscape(owner), url.PathEscape(repo), number, GitHubPageSize, page)
 		var events []timelineEvent
 		if err := c.do(ctx, http.MethodGet, path, nil, &events); err != nil {
 			return false, issueError(owner, repo, number, err)
 		}
 		for _, e := range events {
 			switch e.Event {
-			case utils.GitHubEventConnected:
+			case GitHubEventConnected:
 				linked++
-			case utils.GitHubEventDisconnected:
+			case GitHubEventDisconnected:
 				linked--
 			}
 		}
 		// A short page is the last one
-		if len(events) < utils.GitHubPageSize {
+		if len(events) < GitHubPageSize {
 			return linked > 0, nil
 		}
 	}
@@ -148,7 +146,7 @@ func (c *Client) HasLinkedPullRequest(ctx context.Context, owner, repo string, n
 
 // repoError adds the repository to a not-found, gone or moved error, leaving other errors unchanged.
 func repoError(owner, repo string, err error) error {
-	if errors.Is(err, utils.ErrNotFound) || errors.Is(err, utils.ErrGone) || errors.Is(err, utils.ErrMoved) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
 		return fmt.Errorf("github repository %s/%s: %w", owner, repo, err)
 	}
 	return err
@@ -156,7 +154,7 @@ func repoError(owner, repo string, err error) error {
 
 // issueError adds the issue to a not-found, gone or moved error, leaving other errors unchanged.
 func issueError(owner, repo string, number int, err error) error {
-	if errors.Is(err, utils.ErrNotFound) || errors.Is(err, utils.ErrGone) || errors.Is(err, utils.ErrMoved) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrGone) || errors.Is(err, ErrMoved) {
 		return fmt.Errorf("github issue %s/%s#%d: %w", owner, repo, number, err)
 	}
 	return err
@@ -177,13 +175,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", utils.GitHubMediaType)
-	req.Header.Set(utils.GitHubAPIVersionHeader, utils.GitHubAPIVersion)
+	req.Header.Set("Accept", GitHubMediaType)
+	req.Header.Set(GitHubAPIVersionHeader, GitHubAPIVersion)
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", utils.JSONContentType)
+		req.Header.Set("Content-Type", JSONContentType)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -194,11 +192,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	switch resp.StatusCode {
 	case http.StatusMovedPermanently:
-		return utils.ErrMoved
+		return ErrMoved
 	case http.StatusNotFound:
-		return utils.ErrNotFound
+		return ErrNotFound
 	case http.StatusGone:
-		return utils.ErrGone
+		return ErrGone
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

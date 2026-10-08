@@ -14,8 +14,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/itayshviro/githubissue-operator/internal/controller/utils"
 )
 
 const (
@@ -79,7 +77,7 @@ func TestIssueRequests(t *testing.T) {
 			responseStatus: http.StatusOK,
 			expectedMethod: http.MethodPatch,
 			expectedPath:   "/repos/test-owner/test-repo/issues/5",
-			expectedBody:   map[string]any{"state": utils.GitHubIssueStateClosed},
+			expectedBody:   map[string]any{"state": GitHubIssueStateClosed},
 			expectedIssue:  nil,
 		},
 	}
@@ -97,8 +95,8 @@ func TestIssueRequests(t *testing.T) {
 			assert.Equal(t, tt.expectedPath, requests[0].Path)
 			assert.Equal(t, tt.expectedBody, requests[0].Body)
 			assert.Equal(t, "Bearer "+testToken, requests[0].Header.Get("Authorization"))
-			assert.Equal(t, utils.GitHubMediaType, requests[0].Header.Get("Accept"))
-			assert.Equal(t, utils.GitHubAPIVersion, requests[0].Header.Get(utils.GitHubAPIVersionHeader))
+			assert.Equal(t, GitHubMediaType, requests[0].Header.Get("Accept"))
+			assert.Equal(t, GitHubAPIVersion, requests[0].Header.Get(GitHubAPIVersionHeader))
 		})
 	}
 }
@@ -151,7 +149,7 @@ func TestFindIssueByTitle(t *testing.T) {
 			for i, req := range requests {
 				assert.Equal(t, "/repos/test-owner/test-repo/issues", req.Path)
 				assert.Equal(t, "open", req.Query.Get("state"))
-				assert.Equal(t, strconv.Itoa(utils.GitHubPageSize), req.Query.Get("per_page"))
+				assert.Equal(t, strconv.Itoa(GitHubPageSize), req.Query.Get("per_page"))
 				assert.Equal(t, strconv.Itoa(i+1), req.Query.Get("page"))
 			}
 		})
@@ -179,28 +177,28 @@ func TestErrors(t *testing.T) {
 			name:            "404 for an issue",
 			call:            getIssue,
 			status:          http.StatusNotFound,
-			expectedErr:     utils.ErrNotFound,
+			expectedErr:     ErrNotFound,
 			expectedMessage: "github issue test-owner/test-repo#7: not found",
 		},
 		{
 			name:            "410 for an issue",
 			call:            getIssue,
 			status:          http.StatusGone,
-			expectedErr:     utils.ErrGone,
+			expectedErr:     ErrGone,
 			expectedMessage: "github issue test-owner/test-repo#7: gone",
 		},
 		{
 			name:            "301 for an issue, without following the redirect",
 			call:            getIssue,
 			status:          http.StatusMovedPermanently,
-			expectedErr:     utils.ErrMoved,
+			expectedErr:     ErrMoved,
 			expectedMessage: "github issue test-owner/test-repo#7: moved",
 		},
 		{
 			name:            "410 for a repository",
 			call:            findIssue,
 			status:          http.StatusGone,
-			expectedErr:     utils.ErrGone,
+			expectedErr:     ErrGone,
 			expectedMessage: "github repository test-owner/test-repo: gone",
 		},
 		{
@@ -219,7 +217,7 @@ func TestErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedMessage)
 			// err matches the expected sentinel error, and no other one
-			for _, sentinel := range []error{utils.ErrNotFound, utils.ErrGone, utils.ErrMoved} {
+			for _, sentinel := range []error{ErrNotFound, ErrGone, ErrMoved} {
 				assert.Equal(t, sentinel == tt.expectedErr, errors.Is(err, sentinel), "errors.Is(err, %q)", sentinel)
 			}
 			assert.Len(t, server.requests(), 1, "redirects must not be followed")
@@ -228,9 +226,9 @@ func TestErrors(t *testing.T) {
 }
 
 func TestHasLinkedPullRequest(t *testing.T) {
-	const connected, disconnected = utils.GitHubEventConnected, utils.GitHubEventDisconnected
+	const connected, disconnected = GitHubEventConnected, GitHubEventDisconnected
 	// fullPage is a full page of events that ends with a link, so the client asks for the next page.
-	fullPage := append(slices.Repeat([]string{"labeled"}, utils.GitHubPageSize-1), connected)
+	fullPage := append(slices.Repeat([]string{"labeled"}, GitHubPageSize-1), connected)
 
 	tests := []struct {
 		name             string
