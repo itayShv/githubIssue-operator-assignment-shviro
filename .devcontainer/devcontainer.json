@@ -1,0 +1,34 @@
+{
+    "name": "GitLab Issue Operator",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "latest",
+            "moby": true
+        },
+        "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+    },
+    "runArgs": [
+        "--privileged",
+        "--security-opt",
+        "label=disable"
+    ],
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "go.toolsManagement.checkForUpdates": "local",
+                "go.useLanguageServer": true,
+                "go.gopath": "/go"
+            },
+            "extensions": [
+                "golang.Go",
+                "ms-kubernetes-tools.vscode-kubernetes-tools",
+                "redhat.vscode-yaml"
+            ]
+        }
+    },
+    "remoteUser": "vscode",
+    "postCreateCommand": "go mod download"
+}

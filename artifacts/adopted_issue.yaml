@@ -1,0 +1,9 @@
+apiVersion: github.itayshviro.dev/v1alpha1
+kind: GithubIssue
+metadata:
+  name: adopted-issue
+  namespace: default
+spec:
+  repo: https://github.com/itayShv/githubIssue-operator-assignment-shviro1
+  title: Adopted Issue2
+  description: adopt me lol
